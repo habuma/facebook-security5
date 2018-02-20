@@ -1,0 +1,19 @@
+<!DOCTYPE html SYSTEM "http://www.thymeleaf.org/dtd/xhtml1-strict-thymeleaf-4.dtd">
+
+<html 	xmlns="http://www.w3.org/1999/xhtml"
+		xmlns:th="http://www.thymeleaf.org">
+	<head>
+		<title>Facebook Demo</title>
+	</head>
+	
+	<body>
+	
+		<h2>This Facebook feed belongs to <span th:text="${profile.name}">NAME</span></h2>
+
+		<th:block th:each="post : ${feed}">
+			<h4 th:text="${post.story}">STORY</h4>
+			<p th:text="${post.message}">MESSAGE</p>
+			<hr/>
+		</th:block>
+	</body>
+</html>
