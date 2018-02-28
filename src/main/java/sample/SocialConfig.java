@@ -18,12 +18,16 @@ public class SocialConfig {
 	@RequestScope
 	public Facebook facebook(OAuth2AuthorizedClientService clientService) {
 		Authentication authentication = SecurityContextHolder.getContext().getAuthentication();
+		String accessToken = null;
 		if (authentication.getClass().isAssignableFrom(OAuth2AuthenticationToken.class)) {
 			OAuth2AuthenticationToken oauthToken = (OAuth2AuthenticationToken) authentication;
-			OAuth2AuthorizedClient client = clientService.loadAuthorizedClient(oauthToken.getAuthorizedClientRegistrationId(), oauthToken.getName());
-			return new Facebook(client.getAccessToken().getTokenValue());
+			String clientRegistrationId = oauthToken.getAuthorizedClientRegistrationId();
+			if (clientRegistrationId.equals("facebook")) {
+				OAuth2AuthorizedClient client = clientService.loadAuthorizedClient(clientRegistrationId, oauthToken.getName());
+				accessToken = client.getAccessToken().getTokenValue();
+			}
 		}
-		return null;
+		return new Facebook(accessToken);
 	}
 	
 }

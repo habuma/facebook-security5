@@ -10,23 +10,34 @@ import org.springframework.web.client.RestTemplate;
 
 public abstract class ApiBinding {
 
-	private RestTemplate restTemplate;
+	protected RestTemplate restTemplate;
 
 	public ApiBinding(String accessToken) {
 		this.restTemplate = new RestTemplate();
-		ClientHttpRequestInterceptor interceptor = new ClientHttpRequestInterceptor() {
+		if (accessToken != null) {
+			this.restTemplate.getInterceptors().add(getBearerTokenInterceptor(accessToken));
+		} else {
+			this.restTemplate.getInterceptors().add(getNoTokenInterceptor());
+		}
+	}
+	
+	private ClientHttpRequestInterceptor getBearerTokenInterceptor(String accessToken) {
+		return new ClientHttpRequestInterceptor() {
 			@Override
-			public ClientHttpResponse intercept(HttpRequest request, byte[] bytes, ClientHttpRequestExecution execution)
-					throws IOException {
+			public ClientHttpResponse intercept(HttpRequest request, byte[] bytes, ClientHttpRequestExecution execution) throws IOException {
 				request.getHeaders().add("Authorization", "Bearer " + accessToken);
-				System.out.println(request.getHeaders().get("Authorization"));
 				return execution.execute(request, bytes);
 			}
 		};
-		this.restTemplate.getInterceptors().add(interceptor);
 	}
 	
-	protected RestTemplate getRestTemplate() {
-		return this.restTemplate;
+	private ClientHttpRequestInterceptor getNoTokenInterceptor() {
+		return new ClientHttpRequestInterceptor() {
+			@Override
+			public ClientHttpResponse intercept(HttpRequest request, byte[] bytes, ClientHttpRequestExecution execution) throws IOException {
+				throw new IllegalStateException("Can't access the Facebook API without an access token");
+			}
+		};
 	}
+
 }
