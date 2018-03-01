@@ -1,0 +1,240 @@
+One of the key features in Spring Security 5 is support for writing applications that integrate with services that are secured with OAuth 2. This includes the ability to sign into an application by way of an external service such as Facebook or GitHub.
+
+But with a little bit of extra code, you can also obtain an OAuth 2 access token that can be used to perform authorized requests against the service's API.
+
+In this article, we're going to look at how to develop a Spring Boot application that, using Spring Security 5, integrates with Facebook. You can find the complete code for this article at https://github.com/habuma/facebook-security5.
+
+= Enabling OAuth 2 login
+
+Suppose that you want to enable users of your application to be able to sign in with Facebook. With Spring Security 5, it couldn't be any easier. All you need to do is add Spring Security's OAuth 2 client support to your project's build and then configure your application's Facebook credentials.
+
+First, add the Spring Security OAuth 2 client library to your Spring Boot project's build, along with the Spring Security starter dependency:
+
+```xml
+<dependency>
+  <groupId>org.springframework.boot</groupId>
+  <artifactId>spring-boot-starter-security</artifactId>
+</dependency>
+<dependency>
+  <groupId>org.springframework.security</groupId>
+  <artifactId>spring-security-oauth2-client</artifactId>
+</dependency>
+```
+
+Then you'll need to configure your application's client ID and client secret (which you can obtain by registering your application with Facebook at https://developers.facebook.com/). The properties for all OAuth 2 clients are prefixed with `spring.security.oauth2.client.registration`. For Facebook specifically, you'll add `facebook.client-id` and `facebook-client-secret` properties under that prefix. In the project's `application.yml` file, it will look something like this:
+
+```yaml
+spring:
+  security:
+    oauth2:
+      client:
+        registration:
+          facebook:
+            client-id: YOUR CLIENT ID GOES HERE
+            client-secret: YOUR CLIENT SECRET GOES HERE
+```
+
+You may also set those properties as environment variables, in a properties file, or any property source supported by Spring Boot. Of course, you'll substitute your application's own client ID and secret for the placeholder text shown in the YAML above.
+
+With the OAuth 2 client dependency in place and those properties set, your application will now offer authentication via Facebook. When you try to access a page without having been previously authenticated, you'll be presented a page that looks like this:
+
+image::https://raw.githubusercontent.com/habuma/facebook-security5/master/article/images/FB_Link.png[]
+
+This page offers you the opportunity to login using any of the configured OAuth 2 clients. For our purposes, Facebook is the only option.
+
+After clicking on the Facebook link, you'll be redirected to Facebook. If you've not already signed into Facebook, you'll be prompted to sign in. After signing in, and assuming you've not already authorized this application, you'll be presented with an authorization prompt that will look something like this:
+
+image::https://raw.githubusercontent.com/habuma/facebook-security5/master/article/images/FB_Authorities.png[]
+
+If you choose to continue (by clicking the "Continue" button), you'll be redirected back to your application and will be authenticated. (If you choose "Cancel", you'll also be redirected back to the application, but will not be successfully authenticated.)
+
+Authentication with an external service like Facebook is a nice alternative to a traditional application login. But it's only half of the story. Once the user has logged in, you can also use that authentication to access resources on the remote service's API.
+
+= Accessing API resources
+
+After a successful authentication with an external OAuth 2 service, the `Authentication` object kept in the security context is actually an `OAuth2AuthenticationToken` which, along with help from `OAuth2AuthorizedClientService` can avail us with an access token for making requests against the service's API.
+
+The `Authentication` can be obtained in many ways, including via `SecurityContextHolder`. Once you have the `Authentication`, you can cast it to `OAuth2AuthenticationToken`.
+
+```java
+Authentication authentication =
+    SecurityContextHolder
+        .getContext()
+        .getAuthentication();
+
+OAuth2AuthenticationToken oauthToken =
+    (OAuth2AuthenticationToken) authentication;
+```
+
+There will be an `OAuth2AuthorizedClientService` automatically configured as a bean in the Spring application context, so you'll only need to inject it into wherever you'll use it.
+
+```java
+OAuth2AuthorizedClient client =
+    clientService.loadAuthorizedClient(
+            oauthToken.getAuthorizedClientRegistrationId(),
+            oauthToken.getName());
+
+String accessToken = client.getAccessToken().getTokenValue();
+```
+
+The call to `loadAuthorizedClient()` is given the client's registration ID, which is how the client credentials are registered in configuration--"facebook" in our example. The second parameter is the user's username. Essentially, we're asking the client service to load the `OAuth2AuthorizedClient` for the given user and for the given service. With an `OAuth2AuthorizedClient` in hand, it's a simple matter of asking for the access token value by calling `getAccessToken().getTokenValue()`.
+
+We can apply this technique to flesh out a client API binding for the service. First, we'll create a base API binding class to deal with the essential task of ensuring that the access token is included in all requests:
+
+```java
+public abstract class ApiBinding {
+
+  protected RestTemplate restTemplate;
+
+  public ApiBinding(String accessToken) {
+    this.restTemplate = new RestTemplate();
+    if (accessToken != null) {
+      this.restTemplate.getInterceptors()
+          .add(getBearerTokenInterceptor(accessToken));
+    } else {
+      this.restTemplate.getInterceptors().add(getNoTokenInterceptor());
+    }
+  }
+
+  private ClientHttpRequestInterceptor
+              getBearerTokenInterceptor(String accessToken) {
+    ClientHttpRequestInterceptor interceptor =
+                new ClientHttpRequestInterceptor() {
+      @Override
+      public ClientHttpResponse intercept(HttpRequest request, byte[] bytes,
+                  ClientHttpRequestExecution execution) throws IOException {
+        request.getHeaders().add("Authorization", "Bearer " + accessToken);
+        return execution.execute(request, bytes);
+      }
+    };
+    return interceptor;
+  }
+
+  private ClientHttpRequestInterceptor getNoTokenInterceptor() {
+    return new ClientHttpRequestInterceptor() {
+      @Override
+      public ClientHttpResponse intercept(HttpRequest request, byte[] bytes,
+                  ClientHttpRequestExecution execution) throws IOException {
+        throw new IllegalStateException(
+                "Can't access the API without an access token");
+      }
+    };
+  }
+
+}
+```
+
+The most significant piece of the `ApiBinding` class is the `getBearerTokenInterceptor()` method where a request interceptor is created for the `RestTemplate` to ensure that the given access token is included in all requests to the API. If the given access token is `null`, however, a special request interceptor will throw an `IllegalStateException` without even trying to make the API request. This is acceptable and even desirable behavior for most APIs which require all requests to be authorized.
+
+Now we can write the Facebook API binding based on the `ApiBinding` base class:
+
+```java
+public class Facebook extends ApiBinding {
+
+  private static final String GRAPH_API_BASE_URL =
+              "https://graph.facebook.com/v2.12";
+
+  public Facebook(String accessToken) {
+    super(accessToken);
+  }
+
+  public Profile getProfile() {
+    return restTemplate.getForObject(
+            GRAPH_API_BASE_URL + "/me", Profile.class);
+  }
+
+  public List<Post> getFeed() {
+    return restTemplate.getForObject(
+            GRAPH_API_BASE_URL + "/me/feed", Feed.class).getData();
+  }
+
+}
+```
+
+As you can see, the `Facebook` class is rather simple. All of the OAuth 2 specifics are captured in `ApiBinding`, so this class can focus on making requests to support the operations required by the application.
+
+Now we only need to configure a `Facebook` bean. The bean will be request-scoped to allow for an instance to be created based on the access token from the user's `Authentication`:
+
+```java
+@Configuration
+public class SocialConfig {
+
+  @Bean
+  @RequestScope
+  public Facebook facebook(OAuth2AuthorizedClientService clientService) {
+    Authentication authentication =
+            SecurityContextHolder.getContext().getAuthentication();
+    String accessToken = null;
+    if (authentication.getClass()
+            .isAssignableFrom(OAuth2AuthenticationToken.class)) {
+      OAuth2AuthenticationToken oauthToken =
+              (OAuth2AuthenticationToken) authentication;
+      String clientRegistrationId =
+              oauthToken.getAuthorizedClientRegistrationId();
+      if (clientRegistrationId.equals("facebook")) {
+        OAuth2AuthorizedClient client = clientService.loadAuthorizedClient(
+                    clientRegistrationId, oauthToken.getName());
+        accessToken = client.getAccessToken().getTokenValue();
+      }
+    }
+    return new Facebook(accessToken);
+  }
+
+}
+```
+
+Also, because the `getFeed()` method from the `Facebook` API binding fetches data from the user's feed, we'll need to set `spring.security.oauth2.client.registration.facebook.scope` to specify "user_posts" scope when authenticating the user:
+
+```yaml
+spring:
+  security:
+    oauth2:
+      client:
+        registration:
+          facebook:
+            client-id: YOUR CLIENT ID GOES HERE
+            client-secret: YOUR CLIENT SECRET GOES HERE
+            scope: user_posts
+```
+
+= A more flexible API binding
+
+You may be wondering what this has to do with Spring Social, which also offers support for signing in with an external service as well as an API binding for Facebook.
+
+Spring Social offers sign in support with `ProviderSignInController` and `SocialAuthenticationFilter`. Both of those implementations leverage a `ConnectionFactory` to provide a `ServiceProvider` for the external service. Each of Spring Social's API bindings must provide API-specific implementations of `ConnectionFactory` and `ServiceProvider`. This limits Spring Social to supporting sign in with those services for whom implementations of `ConnectionFactory` and `ServiceProvider` is available.
+
+In contrast, Spring Security 5 is capable of supporting sign in with virtually any OAuth 2 or OpenID Connect service by simply providing the service details in configuration. Out of the box, Spring Security 5 offers baseline configuration for Facebook, Google, GitHub, and Okta (you only need to specify the client ID and secret). But if you must integrate with another service, you must only specify the service's details (such as the authorization URL) in your application configuration.
+
+As for the API binding, Spring Social's API bindings are vast, covering much of what is offered by the APIs that they target. But in reality, most applications need only a fraction of the operations supported by Spring Social. If you only need to fetch a user's feed, why must you work with a large API binding that offers hundreds of other operations? Likewise, if you only care about one or two properties of a post response, why deal with a `Post` object that is comprehensive to what Facebook's Graph API offers? In many cases like this, it may be easier to write your own API binding, tailor-made for your application's needs.
+
+Moreover, Spring Social's API bindings all employ `RestTemplate` under the covers. If you'd rather work with a non-blocking reactive API binding, you're out of luck. Retrofitting the API bindings to be based on `WebClient` is no small undertaking and would essentially double the maintenance of those API bindings.
+
+But if you've developed an API binding of your own, it's easy enough to swap out `RestTemplate` for a reactive `WebClient`, as shown in `ReactiveApiBinding` here:
+
+```java
+public abstract class ReactiveApiBinding {
+  protected WebClient webClient;
+
+  public ReactiveApiBinding(String accessToken) {
+    Builder builder = WebClient.builder();
+    if (accessToken != null) {
+      builder.defaultHeader("Authorization", "Bearer " + accessToken);
+    } else {
+      builder.exchangeFunction(
+          request -> {
+            throw new IllegalStateException(
+                    "Can't access the API without an access token");
+          });
+    }
+    this.webClient = builder.build();
+  }
+}
+```
+
+You may even mix-and-match `WebClient` and `RestTemplate` in the same API binding, applying non-blocking `WebClient` where needed, and `RestTemplate` where a synchronous request is sufficient.
+
+= Summary
+
+Spring Security 5's client-side support for OAuth 2 offers the ability to login via an external service as well as the ability to consume that service's API using a token obtained from the authentication. This is just the first step toward reconciling Spring's OAuth story, which is currently spread across several projects such as Spring Social and Spring Security OAuth.
+
+Future versions of Spring Security will continue to improve upon the OAuth 2 client support as well as take steps toward reconciling Spring's story around the server side of OAuth security. In fact, work currently underway for Spring Security 5.1.0 aims to make working with APIs even easier, effectively eliminating the need for the `ApiBinding` class and much of the plumbing code in the configuration of the `Facebook` bean shown in this article. Stay tuned!
